@@ -1,0 +1,240 @@
+name: ripty-station-azure
+runtime: yaml
+description: >-
+  Ripty Station on one Azure virtual machine in a new resource group, virtual network and public
+  address. The machine installs the Station from your Headquarters, starts it and enrolls it with
+  the join token. It makes the same Station as deploy/aws/ripty-connector.yaml (CloudFormation).
+  Add Station in Headquarters prints the `pulumi config set` command for every Headquarters value
+  below.
+
+config:
+  # The Station address of Headquarters, for example https://203.0.113.7:12199. The machine must
+  # be able to resolve and dial it.
+  consoleUrl:
+    type: string
+  # The join token from Add Station (rtt_ plus 43 characters). It works once and expires after one
+  # day. Set it with `pulumi config set joinToken <token> --secret`.
+  joinToken:
+    type: string
+    secret: true
+  # The certificate pin from Add Station (sha256: plus 64 hex digits). Leave empty when the
+  # Station address of Headquarters has a public certificate. Set it together with consoleSpki.
+  consolePin:
+    type: string
+    default: ""
+  # The public key pin from Add Station (sha256// plus 43 characters and an equals sign). Leave
+  # empty when consolePin is empty. Set it together with consolePin.
+  consoleSpki:
+    type: string
+    default: ""
+  # Optional. A callback zone, for example oob.example.com. When set, the Station also answers DNS
+  # for that zone (it needs port 53, which the network security group opens to allowedCidr).
+  dnsZone:
+    type: string
+    default: ""
+  # The Azure location of every resource, for example eastus or westeurope.
+  region:
+    type: string
+    default: eastus
+  # An x86_64 virtual machine size with at least 2 GiB of memory. The Station binary is linux-x64
+  # only, so there are no Arm sizes.
+  instanceSize:
+    type: string
+    default: Standard_B1ms
+  # An SSH public key line for the user azureuser. Unlike the other clouds, Azure needs one: a
+  # Linux machine with password sign-in off must have a key. Port 22 opens only to sshCidr.
+  sshPublicKey:
+    type: string
+  # Who may reach the Meeting Sites on ports 80, 8080 and 8000 and the Signal Sites on 22000 (ssh)
+  # and 33890 (RDP). The default faces whoever can reach the host, like a default install. For an
+  # internal deception host, narrow it to your internal ranges.
+  allowedCidr:
+    type: string
+    default: 0.0.0.0/0
+  # The range allowed to SSH in (port 22). The default is the documentation address 192.0.2.1,
+  # which nobody connects from, so port 22 stays closed until you set a range.
+  sshCidr:
+    type: string
+    default: 192.0.2.1/32
+
+resources:
+  resourceGroup:
+    type: azure-native:resources:ResourceGroup
+    properties:
+      location: ${region}
+      tags:
+        app: ripty-station
+
+  network:
+    type: azure-native:network:VirtualNetwork
+    properties:
+      resourceGroupName: ${resourceGroup.name}
+      location: ${region}
+      addressSpace:
+        addressPrefixes:
+          - 10.42.0.0/16
+
+  subnet:
+    type: azure-native:network:Subnet
+    properties:
+      resourceGroupName: ${resourceGroup.name}
+      virtualNetworkName: ${network.name}
+      addressPrefix: 10.42.1.0/24
+
+  securityGroup:
+    type: azure-native:network:NetworkSecurityGroup
+    properties:
+      resourceGroupName: ${resourceGroup.name}
+      location: ${region}
+      securityRules:
+        - name: station-sites
+          description: Meeting Sites on 80, 8080 and 8000, Signal Sites on 22000 and 33890
+          priority: 100
+          direction: Inbound
+          access: Allow
+          protocol: Tcp
+          sourceAddressPrefix: ${allowedCidr}
+          sourcePortRange: "*"
+          destinationAddressPrefix: "*"
+          destinationPortRanges: ["80", "8080", "8000", "22000", "33890"]
+        - name: station-dns
+          description: DNS for a callback zone (nothing listens unless dnsZone is set)
+          priority: 110
+          direction: Inbound
+          access: Allow
+          protocol: "*"
+          sourceAddressPrefix: ${allowedCidr}
+          sourcePortRange: "*"
+          destinationAddressPrefix: "*"
+          destinationPortRange: "53"
+        - name: station-ssh
+          description: SSH from sshCidr
+          priority: 120
+          direction: Inbound
+          access: Allow
+          protocol: Tcp
+          sourceAddressPrefix: ${sshCidr}
+          sourcePortRange: "*"
+          destinationAddressPrefix: "*"
+          destinationPortRange: "22"
+
+  publicIp:
+    type: azure-native:network:PublicIPAddress
+    properties:
+      resourceGroupName: ${resourceGroup.name}
+      location: ${region}
+      publicIPAllocationMethod: Static
+      publicIPAddressVersion: IPv4
+      sku:
+        name: Standard
+
+  nic:
+    type: azure-native:network:NetworkInterface
+    properties:
+      resourceGroupName: ${resourceGroup.name}
+      location: ${region}
+      networkSecurityGroup:
+        id: ${securityGroup.id}
+      ipConfigurations:
+        - name: primary
+          privateIPAllocationMethod: Dynamic
+          subnet:
+            id: ${subnet.id}
+          publicIPAddress:
+            id: ${publicIp.id}
+
+  station:
+    type: azure-native:compute:VirtualMachine
+    properties:
+      resourceGroupName: ${resourceGroup.name}
+      location: ${region}
+      tags:
+        app: ripty-station
+      hardwareProfile:
+        vmSize: ${instanceSize}
+      networkProfile:
+        networkInterfaces:
+          - id: ${nic.id}
+            primary: true
+      storageProfile:
+        imageReference:
+          publisher: Canonical
+          offer: ubuntu-24_04-lts
+          sku: server
+          version: latest
+        osDisk:
+          createOption: FromImage
+          diskSizeGB: 30
+          deleteOption: Delete
+          managedDisk:
+            storageAccountType: StandardSSD_LRS
+      osProfile:
+        computerName: ripty-station
+        adminUsername: azureuser
+        linuxConfiguration:
+          disablePasswordAuthentication: true
+          ssh:
+            publicKeys:
+              - path: /home/azureuser/.ssh/authorized_keys
+                keyData: ${sshPublicKey}
+        # Azure runs this script at the first boot (cloud-init). It must be base64.
+        customData:
+          fn::toBase64: |
+            #!/bin/bash
+            # Installs the Station from Headquarters and enrolls it. The log is /var/log/ripty-install.log.
+            # The values come from your own stack config and sit in single quotes below, so a value must
+            # hold no quote. The join token is a Pulumi secret: the state stores this script encrypted.
+            (umask 077; : >>/var/log/ripty-install.log)
+            exec >>/var/log/ripty-install.log 2>&1
+            echo "ripty-install: start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            CONSOLE_URL='${consoleUrl}'
+            JOIN_TOKEN='${joinToken}'
+            CONSOLE_PIN='${consolePin}'
+            CONSOLE_SPKI='${consoleSpki}'
+            DNS_ZONE='${dnsZone}'
+            url_re='^https://[]A-Za-z0-9._~:/[-]*[]A-Za-z0-9._~:[-]$'
+            token_re='^rtt_[A-Za-z0-9_-]{43}$'
+            if ! [[ "$CONSOLE_URL" =~ $url_re ]]; then
+              echo "ripty-install: consoleUrl must be an https address with no trailing slash"
+              exit 2
+            fi
+            if ! [[ "$JOIN_TOKEN" =~ $token_re ]]; then
+              echo "ripty-install: joinToken must be rtt_ followed by 43 letters, digits, underscores or hyphens"
+              exit 2
+            fi
+            if [ -n "$CONSOLE_PIN" ] && [ -z "$CONSOLE_SPKI" ]; then
+              echo "ripty-install: consolePin needs consoleSpki too (copy both from Add Station)"
+              exit 2
+            fi
+            if [ -z "$CONSOLE_PIN" ] && [ -n "$CONSOLE_SPKI" ]; then
+              echo "ripty-install: consoleSpki needs consolePin too (copy both from Add Station)"
+              exit 2
+            fi
+            set -- --role connector --hq-url "$CONSOLE_URL" --join-token "$JOIN_TOKEN"
+            PIN_OPTS=""
+            if [ -n "$CONSOLE_PIN" ]; then
+              set -- "$@" --hq-pin "$CONSOLE_PIN" --hq-spki "$CONSOLE_SPKI"
+              PIN_OPTS="-k --pinnedpubkey $CONSOLE_SPKI"
+            fi
+            if [ -n "$DNS_ZONE" ]; then
+              set -- "$@" --dns-zone "$DNS_ZONE"
+            fi
+            INSTALLER=/root/ripty-install.sh
+            # The token goes to curl on its stdin, so it is on no command line. A cut transfer
+            # (curl exit 18 or 56, which --retry does not retry) leaves a partial file, so curl's
+            # exit status is checked as well as the file.
+            if ! printf 'Authorization: Bearer %s\n' "$JOIN_TOKEN" | curl -fsS --retry 5 --retry-delay 10 --retry-connrefused $PIN_OPTS -H @- -o "$INSTALLER" "$CONSOLE_URL/connector/v1/install.sh" || [ ! -s "$INSTALLER" ]; then
+              rm -f "$INSTALLER"
+              echo "ripty-install: could not fetch the installer from $CONSOLE_URL/connector/v1/install.sh"
+              exit 24
+            fi
+            bash "$INSTALLER" "$@"
+            STATUS=$?
+            rm -f "$INSTALLER"
+            echo "ripty-install: installer exit $STATUS"
+            exit $STATUS
+
+outputs:
+  instanceId: ${station.id}
+  resourceGroup: ${resourceGroup.name}
+  publicIp: ${publicIp.ipAddress}

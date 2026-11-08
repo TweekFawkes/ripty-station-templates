@@ -1,0 +1,243 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Ripty Station on one EC2 instance. The instance installs the Station from your Headquarters
+  (the installer Headquarters serves at /connector/v1/install.sh), starts it, and enrolls it with the
+  join token. Add Station in Headquarters prints the value for every parameter below.
+
+# Long-form intrinsics only (Ref, Fn::Sub, Fn::If, ...), so any YAML parser can read this file.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Headquarters and enrollment (from Add Station in Headquarters)
+        Parameters: [ConsoleUrl, JoinToken, ConsolePin, ConsoleSpki, DnsZone]
+      - Label:
+          default: Network
+        Parameters: [VpcId, SubnetId, AssignPublicIp, AllowedCidr, KeyName, SshCidr]
+      - Label:
+          default: Instance
+        Parameters: [InstanceType, ImageId]
+
+Parameters:
+  ConsoleUrl:
+    Type: String
+    Description: >-
+      The Station address of Headquarters, for example https://203.0.113.7:12199. The instance's subnet
+      must reach it on that port, and the address must be one this instance can resolve and dial.
+    AllowedPattern: '^https://[A-Za-z0-9._~:/\[\]-]*[A-Za-z0-9._~:\[\]-]$'
+    ConstraintDescription: An https address with no trailing slash.
+  JoinToken:
+    Type: String
+    Description: >-
+      The join token from Add Station (rtt_ plus 43 characters). It works once and expires after
+      one day; enrollment spends it. It is not hidden (no NoEcho) so a quick-create link can fill it
+      in: until it is spent it shows in this stack's Parameters tab and in the instance's user data.
+      Create a new join command in Headquarters if it has expired.
+    AllowedPattern: '^rtt_[A-Za-z0-9_-]{43}$'
+    ConstraintDescription: The join token, rtt_ followed by 43 letters, digits, underscores or hyphens.
+  ConsolePin:
+    Type: String
+    Default: ""
+    Description: >-
+      The certificate pin from Add Station (sha256: plus 64 hex digits). Leave empty when the
+      Station address of Headquarters has a public certificate (Headquarters behind a TLS proxy). Set it
+      together with ConsoleSpki.
+    AllowedPattern: '^$|^sha256:[0-9a-f]{64}$'
+    ConstraintDescription: "Empty, or sha256 and a colon, then 64 lowercase hex digits."
+  ConsoleSpki:
+    Type: String
+    Default: ""
+    Description: >-
+      The public key pin from Add Station (sha256// plus 43 characters and an equals sign). Leave
+      empty when ConsolePin is empty. Set it together with ConsolePin.
+    AllowedPattern: '^$|^sha256//[A-Za-z0-9+/]{43}=$'
+    ConstraintDescription: "Empty, or sha256// followed by 43 base64 characters and an equals sign."
+  DnsZone:
+    Type: String
+    Default: ""
+    AllowedPattern: '^$|^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
+    ConstraintDescription: Empty, or a lowercase DNS name such as cb.example.com, with no trailing dot.
+    Description: >-
+      Optional. The DNS callback zone this Station answers for, for example cb.example.com. When set,
+      the security group also opens UDP and TCP port 53 to AllowedCidr (resolvers are anywhere, so
+      widen AllowedCidr if it is narrower). Leave empty for no DNS Station. A zone set later from
+      Headquarters needs port 53 opened by hand: add an inbound UDP rule and a TCP rule for port 53
+      to this stack's security group.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC for the instance and its security group.
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >-
+      A subnet of that VPC. It must reach Headquarters' address on the Station port, and the
+      Internet (or a NAT) for the first start, which downloads uv and the Python packages.
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.small, t3.medium, t3.large, t3a.small, t3a.medium, t3a.large, m6i.large]
+    Description: >-
+      An x86_64 type. The Station binary is linux-x64 only, so there are no Graviton types.
+  AssignPublicIp:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Give the instance a public IPv4 address. Choose false for an internal deception host in a
+      subnet with a NAT route.
+  AllowedCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: An IPv4 CIDR range, for example 10.0.0.0/8.
+    Description: >-
+      Who may reach the Meeting Sites on ports 80, 8080 and 8000 and the Signal Sites on 22000 (ssh) and 33890 (RDP). The default, 0.0.0.0/0, faces
+      whoever can reach the host, like a default install. For an internal deception host, narrow it
+      to your internal ranges.
+  KeyName:
+    Type: String
+    Default: ""
+    Description: Optional. An EC2 key pair name for SSH. Leave empty for no key pair.
+  SshCidr:
+    Type: String
+    Default: ""
+    AllowedPattern: '^$|^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: Empty, or an IPv4 CIDR range.
+    Description: >-
+      Optional. The range allowed to SSH in (port 22). There is no SSH rule unless both KeyName and
+      SshCidr are set.
+  ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+    Description: >-
+      The AMI, read from a public SSM parameter. The installer is tested on Ubuntu 22.04, 24.04 and
+      26.04.
+
+Conditions:
+  HasDns:
+    Fn::Not:
+      - Fn::Equals: [{Ref: DnsZone}, ""]
+  PublicIpOn:
+    Fn::Equals: [{Ref: AssignPublicIp}, "true"]
+  HasKey:
+    Fn::Not:
+      - Fn::Equals: [{Ref: KeyName}, ""]
+  HasSshRule:
+    Fn::And:
+      - Condition: HasKey
+      - Fn::Not:
+          - Fn::Equals: [{Ref: SshCidr}, ""]
+
+Resources:
+  ConnectorSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Ripty Connector: Status Services, and SSH when KeyName and SshCidr are set"
+      VpcId: {Ref: VpcId}
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: {Ref: AllowedCidr}}
+        - {IpProtocol: tcp, FromPort: 8080, ToPort: 8080, CidrIp: {Ref: AllowedCidr}}
+        - {IpProtocol: tcp, FromPort: 8000, ToPort: 8000, CidrIp: {Ref: AllowedCidr}}
+        - {IpProtocol: tcp, FromPort: 22000, ToPort: 22000, CidrIp: {Ref: AllowedCidr}}
+        - {IpProtocol: tcp, FromPort: 33890, ToPort: 33890, CidrIp: {Ref: AllowedCidr}}
+        - Fn::If:
+            - HasDns
+            - {IpProtocol: tcp, FromPort: 53, ToPort: 53, CidrIp: {Ref: AllowedCidr}}
+            - Ref: AWS::NoValue
+        - Fn::If:
+            - HasDns
+            - {IpProtocol: udp, FromPort: 53, ToPort: 53, CidrIp: {Ref: AllowedCidr}}
+            - Ref: AWS::NoValue
+        - Fn::If:
+            - HasSshRule
+            - {IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: {Ref: SshCidr}}
+            - Ref: AWS::NoValue
+      Tags:
+        - {Key: Name, Value: ripty-connector}
+
+  ConnectorInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: {Ref: ImageId}
+      InstanceType: {Ref: InstanceType}
+      KeyName:
+        Fn::If:
+          - HasKey
+          - Ref: KeyName
+          - Ref: AWS::NoValue
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          SubnetId: {Ref: SubnetId}
+          GroupSet: [{Ref: ConnectorSecurityGroup}]
+          AssociatePublicIpAddress:
+            Fn::If: [PublicIpOn, true, false]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 20
+            DeleteOnTermination: true
+      MetadataOptions:
+        HttpTokens: required
+      Tags:
+        - {Key: Name, Value: ripty-connector}
+      UserData:
+        Fn::Base64:
+          Fn::Sub: |
+            #!/bin/bash
+            # Installs the Connector from the Console and enrolls it. The log is
+            # /var/log/ripty-install.log. The parameters are checked by AllowedPattern, so they
+            # hold no quote or shell character.
+            (umask 077; : >>/var/log/ripty-install.log)
+            exec >>/var/log/ripty-install.log 2>&1
+            echo "ripty-install: start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            CONSOLE_URL='${ConsoleUrl}'
+            JOIN_TOKEN='${JoinToken}'
+            CONSOLE_PIN='${ConsolePin}'
+            CONSOLE_SPKI='${ConsoleSpki}'
+            DNS_ZONE='${DnsZone}'
+            if [ -n "$CONSOLE_PIN" ] && [ -z "$CONSOLE_SPKI" ]; then
+              echo "ripty-install: ConsolePin needs ConsoleSpki too (copy both from Add Connector)"
+              exit 2
+            fi
+            if [ -z "$CONSOLE_PIN" ] && [ -n "$CONSOLE_SPKI" ]; then
+              echo "ripty-install: ConsoleSpki needs ConsolePin too (copy both from Add Connector)"
+              exit 2
+            fi
+            set -- --role connector --console-url "$CONSOLE_URL" --join-token "$JOIN_TOKEN"
+            PIN_OPTS=""
+            if [ -n "$CONSOLE_PIN" ]; then
+              set -- "$@" --console-pin "$CONSOLE_PIN" --console-spki "$CONSOLE_SPKI"
+              PIN_OPTS="-k --pinnedpubkey $CONSOLE_SPKI"
+            fi
+            if [ -n "$DNS_ZONE" ]; then
+              set -- "$@" --dns-zone "$DNS_ZONE"
+            fi
+            INSTALLER=/root/ripty-install.sh
+            # The token goes to curl on its stdin, so it is on no command line. A cut transfer
+            # (curl exit 18 or 56, which --retry does not retry) leaves a partial file, so curl's
+            # exit status is checked as well as the file.
+            if ! printf 'Authorization: Bearer %s\n' "$JOIN_TOKEN" | curl -fsS --retry 5 --retry-delay 10 --retry-connrefused $PIN_OPTS -H @- -o "$INSTALLER" "$CONSOLE_URL/connector/v1/install.sh" || [ ! -s "$INSTALLER" ]; then
+              rm -f "$INSTALLER"
+              echo "ripty-install: could not fetch the installer from $CONSOLE_URL/connector/v1/install.sh"
+              exit 24
+            fi
+            bash "$INSTALLER" "$@"
+            STATUS=$?
+            rm -f "$INSTALLER"
+            echo "ripty-install: installer exit $STATUS"
+            exit $STATUS
+
+Outputs:
+  InstanceId:
+    Description: The EC2 instance. It shows on the Stations page once it enrolls.
+    Value: {Ref: ConnectorInstance}
+  PrivateIp:
+    Description: The instance's private IPv4 address.
+    Value:
+      Fn::GetAtt: [ConnectorInstance, PrivateIp]
+  PublicIp:
+    Condition: PublicIpOn
+    Description: The instance's public IPv4 address.
+    Value:
+      Fn::GetAtt: [ConnectorInstance, PublicIp]

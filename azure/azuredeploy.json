@@ -1,0 +1,310 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.48.1.52935",
+      "templateHash": "2498716521512504505"
+    }
+  },
+  "parameters": {
+    "consoleUrl": {
+      "type": "string",
+      "minLength": 9,
+      "maxLength": 300,
+      "metadata": {
+        "description": "The Station address of Headquarters, for example https://203.0.113.7:12199, with no trailing slash. The VM must reach it on that port, and the address must be one the VM can resolve and dial."
+      }
+    },
+    "joinToken": {
+      "type": "securestring",
+      "minLength": 47,
+      "maxLength": 47,
+      "metadata": {
+        "description": "The join token from Add Station (rtt_ plus 43 characters). It works once and expires after one day; enrollment spends it. Create a new join command in Headquarters if it has expired."
+      }
+    },
+    "consolePin": {
+      "type": "string",
+      "defaultValue": "",
+      "maxLength": 71,
+      "metadata": {
+        "description": "The certificate pin from Add Station (sha256: plus 64 hex digits). Leave empty when the Station address of Headquarters has a public certificate. Set it together with consoleSpki."
+      }
+    },
+    "consoleSpki": {
+      "type": "string",
+      "defaultValue": "",
+      "maxLength": 52,
+      "metadata": {
+        "description": "The public key pin from Add Station (sha256// plus 43 characters and an equals sign). Leave empty when consolePin is empty. Set it together with consolePin."
+      }
+    },
+    "dnsZone": {
+      "type": "string",
+      "defaultValue": "",
+      "maxLength": 253,
+      "metadata": {
+        "description": "Optional. The DNS zone this Station answers for (a DNS Station, for Synthetic Markers). When set, the network security group also opens UDP and TCP port 53 to allowedCidr. Leave empty for no DNS Station."
+      }
+    },
+    "adminSshPublicKey": {
+      "type": "string",
+      "minLength": 32,
+      "metadata": {
+        "description": "The SSH public key for the admin user, for example the contents of ~/.ssh/id_ed25519.pub. The VM takes no password."
+      }
+    },
+    "adminUsername": {
+      "type": "string",
+      "defaultValue": "azureuser",
+      "minLength": 1,
+      "maxLength": 32,
+      "metadata": {
+        "description": "The admin user on the VM. It logs in with adminSshPublicKey."
+      }
+    },
+    "allowedCidr": {
+      "type": "string",
+      "defaultValue": "*",
+      "metadata": {
+        "description": "Who may reach the Meeting Sites on ports 80, 8080 and 8000 and the Signal Sites on 22000 (ssh) and 33890 (RDP): an IPv4 CIDR range, or * for anyone. The default, *, faces whoever can reach the host, like a default install. For an internal deception host, narrow it to your internal ranges."
+      }
+    },
+    "sshCidr": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional. The range allowed to SSH in (port 22), an IPv4 CIDR range. There is no SSH rule when this is empty."
+      }
+    },
+    "vmSize": {
+      "type": "string",
+      "defaultValue": "Standard_B1s",
+      "allowedValues": [
+        "Standard_B1s",
+        "Standard_B1ms",
+        "Standard_B2s",
+        "Standard_B2ms",
+        "Standard_D2s_v5"
+      ],
+      "metadata": {
+        "description": "An x86_64 size. The Station binary is linux-x64 only. Standard_B1s has one vCPU and 1 GiB of memory, the minimum for a Station; the installer adds a 1 GiB swap file on a host that small."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "The Azure region. Defaults to the resource group's."
+      }
+    }
+  },
+  "variables": {
+    "name": "ripty-station",
+    "hasSshRule": "[not(empty(parameters('sshCidr')))]",
+    "hasDns": "[not(empty(parameters('dnsZone')))]",
+    "stationRule": {
+      "name": "ripty-station-ports",
+      "properties": {
+        "priority": 100,
+        "direction": "Inbound",
+        "access": "Allow",
+        "protocol": "Tcp",
+        "sourceAddressPrefix": "[parameters('allowedCidr')]",
+        "sourcePortRange": "*",
+        "destinationAddressPrefix": "*",
+        "destinationPortRanges": [
+          "80",
+          "8080",
+          "8000",
+          "22000",
+          "33890"
+        ]
+      }
+    },
+    "sshRule": {
+      "name": "ripty-ssh",
+      "properties": {
+        "priority": 110,
+        "direction": "Inbound",
+        "access": "Allow",
+        "protocol": "Tcp",
+        "sourceAddressPrefix": "[parameters('sshCidr')]",
+        "sourcePortRange": "*",
+        "destinationAddressPrefix": "*",
+        "destinationPortRange": "22"
+      }
+    },
+    "dnsRule": {
+      "name": "ripty-dns",
+      "properties": {
+        "priority": 120,
+        "direction": "Inbound",
+        "access": "Allow",
+        "protocol": "*",
+        "sourceAddressPrefix": "[parameters('allowedCidr')]",
+        "sourcePortRange": "*",
+        "destinationAddressPrefix": "*",
+        "destinationPortRange": "53"
+      }
+    },
+    "securityRules": "[concat(createArray(variables('stationRule')), if(variables('hasSshRule'), createArray(variables('sshRule')), createArray()), if(variables('hasDns'), createArray(variables('dnsRule')), createArray()))]",
+    "installScript": "[join(createArray('#!/bin/bash', format('CONSOLE_URL_B64=\"{0}\"', base64(parameters('consoleUrl'))), format('JOIN_TOKEN_B64=\"{0}\"', base64(parameters('joinToken'))), format('CONSOLE_PIN_B64=\"{0}\"', base64(parameters('consolePin'))), format('CONSOLE_SPKI_B64=\"{0}\"', base64(parameters('consoleSpki'))), format('DNS_ZONE_B64=\"{0}\"', base64(parameters('dnsZone'))), '# Installs the Station from Headquarters and enrolls it. The log is /var/log/ripty-install.log.\n(umask 077; : >>/var/log/ripty-install.log)\nexec >>/var/log/ripty-install.log 2>&1\necho \"ripty-install: start $(date -u +%Y-%m-%dT%H:%M:%SZ)\"\nCONSOLE_URL=$(printf ''%s'' \"$CONSOLE_URL_B64\" | base64 -d)\nJOIN_TOKEN=$(printf ''%s'' \"$JOIN_TOKEN_B64\" | base64 -d)\nCONSOLE_PIN=$(printf ''%s'' \"$CONSOLE_PIN_B64\" | base64 -d)\nCONSOLE_SPKI=$(printf ''%s'' \"$CONSOLE_SPKI_B64\" | base64 -d)\nDNS_ZONE=$(printf ''%s'' \"$DNS_ZONE_B64\" | base64 -d)\nif [ -n \"$CONSOLE_PIN\" ] && [ -z \"$CONSOLE_SPKI\" ]; then\n  echo \"ripty-install: consolePin needs consoleSpki too (copy both from Add Station)\"\n  exit 2\nfi\nif [ -z \"$CONSOLE_PIN\" ] && [ -n \"$CONSOLE_SPKI\" ]; then\n  echo \"ripty-install: consoleSpki needs consolePin too (copy both from Add Station)\"\n  exit 2\nfi\nset -- --role connector --console-url \"$CONSOLE_URL\" --join-token \"$JOIN_TOKEN\"\nCURL_CONFIG=/root/ripty-curl.conf\n(umask 077; : >\"$CURL_CONFIG\")\nif [ -n \"$CONSOLE_PIN\" ]; then\n  set -- \"$@\" --console-pin \"$CONSOLE_PIN\" --console-spki \"$CONSOLE_SPKI\"\n  printf ''insecure\\npinnedpubkey = \"%s\"\\n'' \"$CONSOLE_SPKI\" >\"$CURL_CONFIG\"\nfi\nif [ -n \"$DNS_ZONE\" ]; then\n  set -- \"$@\" --dns-zone \"$DNS_ZONE\"\nfi\nINSTALLER=/root/ripty-install.sh\n# The token goes to curl on its stdin, so it is on no command line. A cut transfer leaves a partial\n# file, so curl''s exit status is checked as well as the file. Six tries, ten seconds apart.\nTRY=0\nwhile :; do\n  if printf ''Authorization: Bearer %s\\n'' \"$JOIN_TOKEN\" | curl -fsS -K \"$CURL_CONFIG\" -H @- -o \"$INSTALLER\" \"$CONSOLE_URL/connector/v1/install.sh\" && [ -s \"$INSTALLER\" ]; then\n    break\n  fi\n  TRY=$((TRY + 1))\n  if [ \"$TRY\" -ge 6 ]; then\n    rm -f \"$INSTALLER\" \"$CURL_CONFIG\"\n    echo \"ripty-install: could not fetch the installer from $CONSOLE_URL/connector/v1/install.sh\"\n    exit 24\n  fi\n  sleep 10\ndone\nrm -f \"$CURL_CONFIG\"\nbash \"$INSTALLER\" \"$@\"\nSTATUS=$?\nrm -f \"$INSTALLER\"\necho \"ripty-install: installer exit $STATUS\"\nexit $STATUS\n'), '\n')]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2024-05-01",
+      "name": "[format('{0}-vnet', variables('name'))]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [
+            "10.60.0.0/24"
+          ]
+        },
+        "subnets": [
+          {
+            "name": "default",
+            "properties": {
+              "addressPrefix": "10.60.0.0/26"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2024-05-01",
+      "name": "[format('{0}-nsg', variables('name'))]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "securityRules": "[variables('securityRules')]"
+      }
+    },
+    {
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2024-05-01",
+      "name": "[format('{0}-ip', variables('name'))]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard"
+      },
+      "properties": {
+        "publicIPAllocationMethod": "Static",
+        "publicIPAddressVersion": "IPv4"
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2024-05-01",
+      "name": "[format('{0}-nic', variables('name'))]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "networkSecurityGroup": {
+          "id": "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-nsg', variables('name')))]"
+        },
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "privateIPAllocationMethod": "Dynamic",
+              "subnet": {
+                "id": "[reference(resourceId('Microsoft.Network/virtualNetworks', format('{0}-vnet', variables('name'))), '2024-05-01').subnets[0].id]"
+              },
+              "publicIPAddress": {
+                "id": "[resourceId('Microsoft.Network/publicIPAddresses', format('{0}-ip', variables('name')))]"
+              }
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks', format('{0}-vnet', variables('name')))]",
+        "[resourceId('Microsoft.Network/publicIPAddresses', format('{0}-ip', variables('name')))]",
+        "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-nsg', variables('name')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2024-07-01",
+      "name": "[variables('name')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[parameters('vmSize')]"
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "Canonical",
+            "offer": "ubuntu-24_04-lts",
+            "sku": "server",
+            "version": "latest"
+          },
+          "osDisk": {
+            "createOption": "FromImage",
+            "deleteOption": "Delete",
+            "diskSizeGB": 30,
+            "managedDisk": {
+              "storageAccountType": "StandardSSD_LRS"
+            }
+          }
+        },
+        "osProfile": {
+          "computerName": "[variables('name')]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "customData": "[base64(variables('installScript'))]",
+          "linuxConfiguration": {
+            "disablePasswordAuthentication": true,
+            "ssh": {
+              "publicKeys": [
+                {
+                  "path": "[format('/home/{0}/.ssh/authorized_keys', parameters('adminUsername'))]",
+                  "keyData": "[parameters('adminSshPublicKey')]"
+                }
+              ]
+            }
+          }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', format('{0}-nic', variables('name')))]",
+              "properties": {
+                "deleteOption": "Delete"
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkInterfaces', format('{0}-nic', variables('name')))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "vmName": {
+      "type": "string",
+      "metadata": {
+        "description": "The virtual machine. It shows on the Stations page once it enrolls."
+      },
+      "value": "[variables('name')]"
+    },
+    "publicIpAddress": {
+      "type": "string",
+      "metadata": {
+        "description": "The VM's public IPv4 address."
+      },
+      "value": "[reference(resourceId('Microsoft.Network/publicIPAddresses', format('{0}-ip', variables('name'))), '2024-05-01').ipAddress]"
+    },
+    "privateIpAddress": {
+      "type": "string",
+      "metadata": {
+        "description": "The VM's private IPv4 address."
+      },
+      "value": "[reference(resourceId('Microsoft.Network/networkInterfaces', format('{0}-nic', variables('name'))), '2024-05-01').ipConfigurations[0].properties.privateIPAddress]"
+    }
+  }
+}

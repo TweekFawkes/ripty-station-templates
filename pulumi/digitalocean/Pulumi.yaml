@@ -1,0 +1,165 @@
+name: ripty-station-digitalocean
+runtime: yaml
+description: >-
+  Ripty Station on one DigitalOcean droplet behind a cloud firewall. The droplet installs the
+  Station from your Headquarters at its first boot, starts it and enrolls it with the join token.
+  It makes the same Station as deploy/aws/ripty-connector.yaml (CloudFormation). Add Station in
+  Headquarters prints the `pulumi config set` command for every Headquarters value below. Also
+  export DIGITALOCEAN_TOKEN, or run `pulumi config set digitalocean:token <token> --secret`.
+
+config:
+  # The Station address of Headquarters, for example https://203.0.113.7:12199. The droplet must
+  # be able to resolve and dial it.
+  consoleUrl:
+    type: string
+  # The join token from Add Station (rtt_ plus 43 characters). It works once and expires after one
+  # day. Set it with `pulumi config set joinToken <token> --secret`.
+  joinToken:
+    type: string
+    secret: true
+  # The certificate pin from Add Station (sha256: plus 64 hex digits). Leave empty when the
+  # Station address of Headquarters has a public certificate. Set it together with consoleSpki.
+  consolePin:
+    type: string
+    default: ""
+  # The public key pin from Add Station (sha256// plus 43 characters and an equals sign). Leave
+  # empty when consolePin is empty. Set it together with consolePin.
+  consoleSpki:
+    type: string
+    default: ""
+  # Optional. A callback zone, for example oob.example.com. When set, the Station also answers DNS
+  # for that zone (it needs port 53, which the firewall opens to allowedCidr).
+  dnsZone:
+    type: string
+    default: ""
+  # The DigitalOcean region slug, for example nyc3 or fra1.
+  region:
+    type: string
+    default: nyc3
+  # A droplet size slug with at least 2 GB of memory. The Station binary is linux-x64 only, so
+  # pick a size with an x86_64 CPU.
+  instanceSize:
+    type: string
+    default: s-1vcpu-2gb
+  # Optional. An SSH public key line. When set, the droplet adds it to root. Port 22 opens only to
+  # sshCidr.
+  sshPublicKey:
+    type: string
+    default: ""
+  # Who may reach the Meeting Sites on ports 80, 8080 and 8000 and the Signal Sites on 22000 (ssh)
+  # and 33890 (RDP). The default faces whoever can reach the host, like a default install. For an
+  # internal deception host, narrow it to your internal ranges.
+  allowedCidr:
+    type: string
+    default: 0.0.0.0/0
+  # The range allowed to SSH in (port 22). The default is the documentation address 192.0.2.1,
+  # which nobody connects from, so port 22 stays closed until you set a range.
+  sshCidr:
+    type: string
+    default: 192.0.2.1/32
+
+resources:
+  stationTag:
+    type: digitalocean:Tag
+    properties:
+      name: ripty-station-${pulumi.stack}
+
+  station:
+    type: digitalocean:Droplet
+    properties:
+      name: ripty-station-${pulumi.stack}
+      image: ubuntu-24-04-x64
+      region: ${region}
+      size: ${instanceSize}
+      tags:
+        - ${stationTag.name}
+      userData: |
+        #!/bin/bash
+        # Installs the Station from Headquarters and enrolls it. The log is /var/log/ripty-install.log.
+        # The values come from your own stack config and sit in single quotes below, so a value must
+        # hold no quote. The join token is a Pulumi secret: the state stores this script encrypted.
+        (umask 077; : >>/var/log/ripty-install.log)
+        exec >>/var/log/ripty-install.log 2>&1
+        echo "ripty-install: start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        CONSOLE_URL='${consoleUrl}'
+        JOIN_TOKEN='${joinToken}'
+        CONSOLE_PIN='${consolePin}'
+        CONSOLE_SPKI='${consoleSpki}'
+        DNS_ZONE='${dnsZone}'
+        SSH_PUBLIC_KEY='${sshPublicKey}'
+        if [ -n "$SSH_PUBLIC_KEY" ]; then
+          install -d -m 700 -o root -g root /root/.ssh
+          printf '%s\n' "$SSH_PUBLIC_KEY" >>/root/.ssh/authorized_keys
+          chmod 600 /root/.ssh/authorized_keys
+        fi
+        url_re='^https://[]A-Za-z0-9._~:/[-]*[]A-Za-z0-9._~:[-]$'
+        token_re='^rtt_[A-Za-z0-9_-]{43}$'
+        if ! [[ "$CONSOLE_URL" =~ $url_re ]]; then
+          echo "ripty-install: consoleUrl must be an https address with no trailing slash"
+          exit 2
+        fi
+        if ! [[ "$JOIN_TOKEN" =~ $token_re ]]; then
+          echo "ripty-install: joinToken must be rtt_ followed by 43 letters, digits, underscores or hyphens"
+          exit 2
+        fi
+        if [ -n "$CONSOLE_PIN" ] && [ -z "$CONSOLE_SPKI" ]; then
+          echo "ripty-install: consolePin needs consoleSpki too (copy both from Add Station)"
+          exit 2
+        fi
+        if [ -z "$CONSOLE_PIN" ] && [ -n "$CONSOLE_SPKI" ]; then
+          echo "ripty-install: consoleSpki needs consolePin too (copy both from Add Station)"
+          exit 2
+        fi
+        set -- --role connector --hq-url "$CONSOLE_URL" --join-token "$JOIN_TOKEN"
+        PIN_OPTS=""
+        if [ -n "$CONSOLE_PIN" ]; then
+          set -- "$@" --hq-pin "$CONSOLE_PIN" --hq-spki "$CONSOLE_SPKI"
+          PIN_OPTS="-k --pinnedpubkey $CONSOLE_SPKI"
+        fi
+        if [ -n "$DNS_ZONE" ]; then
+          set -- "$@" --dns-zone "$DNS_ZONE"
+        fi
+        INSTALLER=/root/ripty-install.sh
+        # The token goes to curl on its stdin, so it is on no command line. A cut transfer
+        # (curl exit 18 or 56, which --retry does not retry) leaves a partial file, so curl's
+        # exit status is checked as well as the file.
+        if ! printf 'Authorization: Bearer %s\n' "$JOIN_TOKEN" | curl -fsS --retry 5 --retry-delay 10 --retry-connrefused $PIN_OPTS -H @- -o "$INSTALLER" "$CONSOLE_URL/connector/v1/install.sh" || [ ! -s "$INSTALLER" ]; then
+          rm -f "$INSTALLER"
+          echo "ripty-install: could not fetch the installer from $CONSOLE_URL/connector/v1/install.sh"
+          exit 24
+        fi
+        bash "$INSTALLER" "$@"
+        STATUS=$?
+        rm -f "$INSTALLER"
+        echo "ripty-install: installer exit $STATUS"
+        exit $STATUS
+    options:
+      # A new join token makes a new Station, so changed user data replaces the droplet.
+      replaceOnChanges:
+        - userData
+
+  firewall:
+    type: digitalocean:Firewall
+    properties:
+      name: ripty-station-${pulumi.stack}
+      tags:
+        - ${stationTag.name}
+      inboundRules:
+        - {protocol: tcp, portRange: "80", sourceAddresses: ["${allowedCidr}"]}
+        - {protocol: tcp, portRange: "8080", sourceAddresses: ["${allowedCidr}"]}
+        - {protocol: tcp, portRange: "8000", sourceAddresses: ["${allowedCidr}"]}
+        - {protocol: tcp, portRange: "22000", sourceAddresses: ["${allowedCidr}"]}
+        - {protocol: tcp, portRange: "33890", sourceAddresses: ["${allowedCidr}"]}
+        - {protocol: tcp, portRange: "53", sourceAddresses: ["${allowedCidr}"]}
+        - {protocol: udp, portRange: "53", sourceAddresses: ["${allowedCidr}"]}
+        - {protocol: tcp, portRange: "22", sourceAddresses: ["${sshCidr}"]}
+      # A DigitalOcean firewall blocks everything it does not allow, outbound too.
+      outboundRules:
+        - {protocol: tcp, portRange: "1-65535", destinationAddresses: ["0.0.0.0/0", "::/0"]}
+        - {protocol: udp, portRange: "1-65535", destinationAddresses: ["0.0.0.0/0", "::/0"]}
+        - {protocol: icmp, destinationAddresses: ["0.0.0.0/0", "::/0"]}
+
+outputs:
+  instanceId: ${station.id}
+  privateIp: ${station.ipv4AddressPrivate}
+  publicIp: ${station.ipv4Address}
