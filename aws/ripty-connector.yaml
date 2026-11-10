@@ -111,7 +111,9 @@ Parameters:
     Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
     Description: >-
       The AMI, read from a public SSM parameter. The installer is tested on Ubuntu 22.04, 24.04 and
-      26.04.
+      26.04. A stack update after Canonical moves the parameter to a new AMI replaces the Station
+      with one that boots on a spent join token; run Add Station again for a fresh join command
+      before you update the stack.
 
 Conditions:
   HasDns:
@@ -158,6 +160,10 @@ Resources:
   ConnectorInstance:
     Type: AWS::EC2::Instance
     Properties:
+      # CloudFormation resolves the ImageId parameter again on every stack update, and CloudFormation
+      # cannot ignore a property. A new AMI replaces this instance, and the replacement boots the user
+      # data below with a join token that the first enrollment spent. Update the stack only with a
+      # fresh join command from Add Station.
       ImageId: {Ref: ImageId}
       InstanceType: {Ref: InstanceType}
       KeyName:
@@ -212,6 +218,12 @@ Resources:
             fi
             if [ -n "$DNS_ZONE" ]; then
               set -- "$@" --dns-zone "$DNS_ZONE"
+              # A cloud host answers with its private address unless it is told its public one.
+              MD_TOKEN=$(curl -fsS --max-time 5 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token)
+              ANSWER_IP=$(curl -fsS --max-time 5 -H "X-aws-ec2-metadata-token: $MD_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+              if printf '%s' "$ANSWER_IP" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+                set -- "$@" --dns-answer-ip "$ANSWER_IP"
+              fi
             fi
             INSTALLER=/root/ripty-install.sh
             # The token goes to curl on its stdin, so it is on no command line. A cut transfer

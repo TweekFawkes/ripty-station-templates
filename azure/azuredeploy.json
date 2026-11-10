@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.48.1.52935",
-      "templateHash": "2498716521512504505"
+      "templateHash": "5921392680164129329"
     }
   },
   "parameters": {
@@ -150,8 +150,7 @@
         "destinationPortRange": "53"
       }
     },
-    "securityRules": "[concat(createArray(variables('stationRule')), if(variables('hasSshRule'), createArray(variables('sshRule')), createArray()), if(variables('hasDns'), createArray(variables('dnsRule')), createArray()))]",
-    "installScript": "[join(createArray('#!/bin/bash', format('CONSOLE_URL_B64=\"{0}\"', base64(parameters('consoleUrl'))), format('JOIN_TOKEN_B64=\"{0}\"', base64(parameters('joinToken'))), format('CONSOLE_PIN_B64=\"{0}\"', base64(parameters('consolePin'))), format('CONSOLE_SPKI_B64=\"{0}\"', base64(parameters('consoleSpki'))), format('DNS_ZONE_B64=\"{0}\"', base64(parameters('dnsZone'))), '# Installs the Station from Headquarters and enrolls it. The log is /var/log/ripty-install.log.\n(umask 077; : >>/var/log/ripty-install.log)\nexec >>/var/log/ripty-install.log 2>&1\necho \"ripty-install: start $(date -u +%Y-%m-%dT%H:%M:%SZ)\"\nCONSOLE_URL=$(printf ''%s'' \"$CONSOLE_URL_B64\" | base64 -d)\nJOIN_TOKEN=$(printf ''%s'' \"$JOIN_TOKEN_B64\" | base64 -d)\nCONSOLE_PIN=$(printf ''%s'' \"$CONSOLE_PIN_B64\" | base64 -d)\nCONSOLE_SPKI=$(printf ''%s'' \"$CONSOLE_SPKI_B64\" | base64 -d)\nDNS_ZONE=$(printf ''%s'' \"$DNS_ZONE_B64\" | base64 -d)\nif [ -n \"$CONSOLE_PIN\" ] && [ -z \"$CONSOLE_SPKI\" ]; then\n  echo \"ripty-install: consolePin needs consoleSpki too (copy both from Add Station)\"\n  exit 2\nfi\nif [ -z \"$CONSOLE_PIN\" ] && [ -n \"$CONSOLE_SPKI\" ]; then\n  echo \"ripty-install: consoleSpki needs consolePin too (copy both from Add Station)\"\n  exit 2\nfi\nset -- --role connector --console-url \"$CONSOLE_URL\" --join-token \"$JOIN_TOKEN\"\nCURL_CONFIG=/root/ripty-curl.conf\n(umask 077; : >\"$CURL_CONFIG\")\nif [ -n \"$CONSOLE_PIN\" ]; then\n  set -- \"$@\" --console-pin \"$CONSOLE_PIN\" --console-spki \"$CONSOLE_SPKI\"\n  printf ''insecure\\npinnedpubkey = \"%s\"\\n'' \"$CONSOLE_SPKI\" >\"$CURL_CONFIG\"\nfi\nif [ -n \"$DNS_ZONE\" ]; then\n  set -- \"$@\" --dns-zone \"$DNS_ZONE\"\nfi\nINSTALLER=/root/ripty-install.sh\n# The token goes to curl on its stdin, so it is on no command line. A cut transfer leaves a partial\n# file, so curl''s exit status is checked as well as the file. Six tries, ten seconds apart.\nTRY=0\nwhile :; do\n  if printf ''Authorization: Bearer %s\\n'' \"$JOIN_TOKEN\" | curl -fsS -K \"$CURL_CONFIG\" -H @- -o \"$INSTALLER\" \"$CONSOLE_URL/connector/v1/install.sh\" && [ -s \"$INSTALLER\" ]; then\n    break\n  fi\n  TRY=$((TRY + 1))\n  if [ \"$TRY\" -ge 6 ]; then\n    rm -f \"$INSTALLER\" \"$CURL_CONFIG\"\n    echo \"ripty-install: could not fetch the installer from $CONSOLE_URL/connector/v1/install.sh\"\n    exit 24\n  fi\n  sleep 10\ndone\nrm -f \"$CURL_CONFIG\"\nbash \"$INSTALLER\" \"$@\"\nSTATUS=$?\nrm -f \"$INSTALLER\"\necho \"ripty-install: installer exit $STATUS\"\nexit $STATUS\n'), '\n')]"
+    "securityRules": "[concat(createArray(variables('stationRule')), if(variables('hasSshRule'), createArray(variables('sshRule')), createArray()), if(variables('hasDns'), createArray(variables('dnsRule')), createArray()))]"
   },
   "resources": [
     {
@@ -255,7 +254,7 @@
         "osProfile": {
           "computerName": "[variables('name')]",
           "adminUsername": "[parameters('adminUsername')]",
-          "customData": "[base64(variables('installScript'))]",
+          "customData": "[base64(join(createArray('#!/bin/bash', format('CONSOLE_URL_B64=\"{0}\"', base64(parameters('consoleUrl'))), format('JOIN_TOKEN_B64=\"{0}\"', base64(parameters('joinToken'))), format('CONSOLE_PIN_B64=\"{0}\"', base64(parameters('consolePin'))), format('CONSOLE_SPKI_B64=\"{0}\"', base64(parameters('consoleSpki'))), format('DNS_ZONE_B64=\"{0}\"', base64(parameters('dnsZone'))), format('ANSWER_IP=\"{0}\"', reference(resourceId('Microsoft.Network/publicIPAddresses', format('{0}-ip', variables('name'))), '2024-05-01').ipAddress), '# Installs the Station from Headquarters and enrolls it. The log is /var/log/ripty-install.log.\n(umask 077; : >>/var/log/ripty-install.log)\nexec >>/var/log/ripty-install.log 2>&1\necho \"ripty-install: start $(date -u +%Y-%m-%dT%H:%M:%SZ)\"\nCONSOLE_URL=$(printf ''%s'' \"$CONSOLE_URL_B64\" | base64 -d)\nJOIN_TOKEN=$(printf ''%s'' \"$JOIN_TOKEN_B64\" | base64 -d)\nCONSOLE_PIN=$(printf ''%s'' \"$CONSOLE_PIN_B64\" | base64 -d)\nCONSOLE_SPKI=$(printf ''%s'' \"$CONSOLE_SPKI_B64\" | base64 -d)\nDNS_ZONE=$(printf ''%s'' \"$DNS_ZONE_B64\" | base64 -d)\nif [ -n \"$CONSOLE_PIN\" ] && [ -z \"$CONSOLE_SPKI\" ]; then\n  echo \"ripty-install: consolePin needs consoleSpki too (copy both from Add Station)\"\n  exit 2\nfi\nif [ -z \"$CONSOLE_PIN\" ] && [ -n \"$CONSOLE_SPKI\" ]; then\n  echo \"ripty-install: consoleSpki needs consolePin too (copy both from Add Station)\"\n  exit 2\nfi\nset -- --role connector --console-url \"$CONSOLE_URL\" --join-token \"$JOIN_TOKEN\"\nCURL_CONFIG=/root/ripty-curl.conf\n(umask 077; : >\"$CURL_CONFIG\")\nif [ -n \"$CONSOLE_PIN\" ]; then\n  set -- \"$@\" --console-pin \"$CONSOLE_PIN\" --console-spki \"$CONSOLE_SPKI\"\n  printf ''insecure\\npinnedpubkey = \"%s\"\\n'' \"$CONSOLE_SPKI\" >\"$CURL_CONFIG\"\nfi\nif [ -n \"$DNS_ZONE\" ]; then\n  # A cloud host answers with its private address unless it is told its public one.\n  set -- \"$@\" --dns-zone \"$DNS_ZONE\"\n  if printf ''%s'' \"$ANSWER_IP\" | grep -Eq ''^([0-9]{1,3}\\.){3}[0-9]{1,3}$''; then\n    set -- \"$@\" --dns-answer-ip \"$ANSWER_IP\"\n  fi\nfi\nINSTALLER=/root/ripty-install.sh\n# The token goes to curl on its stdin, so it is on no command line. A cut transfer leaves a partial\n# file, so curl''s exit status is checked as well as the file. Six tries, ten seconds apart.\nTRY=0\nwhile :; do\n  if printf ''Authorization: Bearer %s\\n'' \"$JOIN_TOKEN\" | curl -fsS -K \"$CURL_CONFIG\" -H @- -o \"$INSTALLER\" \"$CONSOLE_URL/connector/v1/install.sh\" && [ -s \"$INSTALLER\" ]; then\n    break\n  fi\n  TRY=$((TRY + 1))\n  if [ \"$TRY\" -ge 6 ]; then\n    rm -f \"$INSTALLER\" \"$CURL_CONFIG\"\n    echo \"ripty-install: could not fetch the installer from $CONSOLE_URL/connector/v1/install.sh\"\n    exit 24\n  fi\n  sleep 10\ndone\nrm -f \"$CURL_CONFIG\"\nbash \"$INSTALLER\" \"$@\"\nSTATUS=$?\nrm -f \"$INSTALLER\"\necho \"ripty-install: installer exit $STATUS\"\nexit $STATUS\n'), '\n'))]",
           "linuxConfiguration": {
             "disablePasswordAuthentication": true,
             "ssh": {
@@ -280,7 +279,8 @@
         }
       },
       "dependsOn": [
-        "[resourceId('Microsoft.Network/networkInterfaces', format('{0}-nic', variables('name')))]"
+        "[resourceId('Microsoft.Network/networkInterfaces', format('{0}-nic', variables('name')))]",
+        "[resourceId('Microsoft.Network/publicIPAddresses', format('{0}-ip', variables('name')))]"
       ]
     }
   ],

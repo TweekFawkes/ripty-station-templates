@@ -111,6 +111,9 @@ var installScript = join(
     'CONSOLE_PIN_B64="${base64(consolePin)}"'
     'CONSOLE_SPKI_B64="${base64(consoleSpki)}"'
     'DNS_ZONE_B64="${base64(dnsZone)}"'
+    // The Standard SKU address is Static and Azure allocates it with the resource, but Azure's metadata
+    // service does not report it, so the script takes it from here.
+    'ANSWER_IP="${publicIp.properties.ipAddress}"'
     '''
 # Installs the Station from Headquarters and enrolls it. The log is /var/log/ripty-install.log.
 (umask 077; : >>/var/log/ripty-install.log)
@@ -137,7 +140,11 @@ if [ -n "$CONSOLE_PIN" ]; then
   printf 'insecure\npinnedpubkey = "%s"\n' "$CONSOLE_SPKI" >"$CURL_CONFIG"
 fi
 if [ -n "$DNS_ZONE" ]; then
+  # A cloud host answers with its private address unless it is told its public one.
   set -- "$@" --dns-zone "$DNS_ZONE"
+  if printf '%s' "$ANSWER_IP" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+    set -- "$@" --dns-answer-ip "$ANSWER_IP"
+  fi
 fi
 INSTALLER=/root/ripty-install.sh
 # The token goes to curl on its stdin, so it is on no command line. A cut transfer leaves a partial

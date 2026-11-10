@@ -193,6 +193,11 @@ if [ -n "$CONSOLE_PIN" ]; then
 fi
 if [ -n "$DNS_ZONE" ]; then
   set -- "$@" --dns-zone "$DNS_ZONE"
+  # A cloud host answers with its private address unless it is told its public one.
+  ANSWER_IP=$(curl -fsS --max-time 5 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip)
+  if printf '%s' "$ANSWER_IP" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+    set -- "$@" --dns-answer-ip "$ANSWER_IP"
+  fi
 fi
 INSTALLER=/root/ripty-install.sh
 # The token goes to curl on its stdin, so it is on no command line. A cut transfer (curl exit 18 or
@@ -271,6 +276,7 @@ fi
 CREATE_ARGS=(compute instances create "$NAME" --project "$PROJECT" --zone "$ZONE"
   --machine-type "$MACHINE_TYPE" --image-family ubuntu-2404-lts-amd64 --image-project ubuntu-os-cloud
   --boot-disk-size 20GB --boot-disk-type pd-balanced --network "$NETWORK" --tags "$NAME"
+  --no-service-account --no-scopes
   --metadata-from-file "startup-script=$STARTUP_FILE"
   --format 'value(name,networkInterfaces[0].accessConfigs[0].natIP)')
 if [ -n "$SUBNET" ]; then

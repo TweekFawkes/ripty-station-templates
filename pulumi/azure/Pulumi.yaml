@@ -217,7 +217,10 @@ resources:
               PIN_OPTS="-k --pinnedpubkey $CONSOLE_SPKI"
             fi
             if [ -n "$DNS_ZONE" ]; then
-              set -- "$@" --dns-zone "$DNS_ZONE"
+              # A cloud host answers with its private address unless it is told its public one. The
+              # Standard SKU address is Static and Pulumi knows it before the VM exists (Azure's
+              # metadata service does not report a Standard SKU address).
+              set -- "$@" --dns-zone "$DNS_ZONE" --dns-answer-ip '${publicIp.ipAddress}'
             fi
             INSTALLER=/root/ripty-install.sh
             # The token goes to curl on its stdin, so it is on no command line. A cut transfer
@@ -233,6 +236,11 @@ resources:
             rm -f "$INSTALLER"
             echo "ripty-install: installer exit $STATUS"
             exit $STATUS
+    options:
+      # A new join token makes a new Station, so changed custom data replaces the machine (Azure does
+      # not change a machine's custom data in place).
+      replaceOnChanges:
+        - osProfile.customData
 
 outputs:
   instanceId: ${station.id}
